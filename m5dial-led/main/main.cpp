@@ -62,8 +62,8 @@ static const char *TAG = "M5Dial-LED";
 #define BUZZER_PIN 3
 
 // WS2812B Configuration
-#define LED_STRIP_PIN GPIO_NUM_1  // Grove Port A - GPIO1
-#define LED_STRIP_MAX_LEDS 60     // Maximum supported LEDs
+#define LED_STRIP_PIN GPIO_NUM_15  // Grove Port A - GPIO15 (white wire / SCL)
+#define LED_STRIP_MAX_LEDS 60      // Maximum supported LEDs
 
 // M5Dial Display Class
 class LGFX_M5Dial : public lgfx::LGFX_Device {
@@ -205,7 +205,113 @@ void hsv_to_rgb(uint16_t h, uint8_t s, uint8_t v, uint8_t *r, uint8_t *g, uint8_
 
 // ===== LED Strip Functions =====
 
+// Debug info displayed on screen
+static char debug_line1[32] = "";
+static char debug_line2[32] = "";
+static char debug_line3[32] = "";
+
+void show_debug_screen(const char* line1, const char* line2, const char* line3) {
+    canvas.fillScreen(TFT_BLACK);
+    canvas.setTextDatum(MC_DATUM);
+
+    // Line 1 - Large
+    canvas.setFont(&fonts::Font4);
+    canvas.setTextColor(TFT_WHITE);
+    canvas.drawString(line1, 120, 60);
+
+    // Line 2 - Extra Large
+    canvas.setFont(&fonts::lgfxJapanGothicP_32);
+    canvas.setTextColor(TFT_GREEN);
+    canvas.drawString(line2, 120, 120);
+
+    // Line 3 - Medium
+    canvas.setFont(&fonts::Font4);
+    canvas.setTextColor(TFT_YELLOW);
+    canvas.drawString(line3, 120, 180);
+
+    canvas.pushSprite(0, 0);
+}
+
+bool wait_for_button_press() {
+    // Wait for button release first (if pressed)
+    while (gpio_get_level((gpio_num_t)ENCODER_BTN_PIN) == 0) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    // Wait for button press
+    while (gpio_get_level((gpio_num_t)ENCODER_BTN_PIN) == 1) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    vTaskDelay(pdMS_TO_TICKS(200));  // Debounce
+    return true;
+}
+
+void gpio_voltage_test() {
+    // Configure button input first
+    gpio_config_t btn_conf = {
+        .pin_bit_mask = (1ULL << ENCODER_BTN_PIN),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&btn_conf);
+
+    // Set BOTH GPIO13 and GPIO15 to HIGH at the same time
+    // Port A: Yellow=GPIO13(SDA), White=GPIO15(SCL)
+
+    gpio_reset_pin(GPIO_NUM_13);
+    gpio_reset_pin(GPIO_NUM_15);
+
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << GPIO_NUM_13) | (1ULL << GPIO_NUM_15),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,  // Enable internal pull-up
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    esp_err_t ret = gpio_config(&io_conf);
+
+    char msg[64];
+    if (ret != ESP_OK) {
+        snprintf(msg, sizeof(msg), "Config Error: %s", esp_err_to_name(ret));
+        show_debug_screen("GPIO FAIL", msg, "Press button");
+        wait_for_button_press();
+    } else {
+        // Set both HIGH
+        gpio_set_level(GPIO_NUM_13, 1);
+        gpio_set_level(GPIO_NUM_15, 1);
+
+        show_debug_screen("BOTH GPIO HIGH", "G13+G15=3.3V", "Measure Y & W");
+        wait_for_button_press();
+
+        // Set both LOW
+        gpio_set_level(GPIO_NUM_13, 0);
+        gpio_set_level(GPIO_NUM_15, 0);
+
+        show_debug_screen("BOTH GPIO LOW", "G13+G15=0V", "Measure Y & W");
+        wait_for_button_press();
+    }
+
+    gpio_reset_pin(GPIO_NUM_13);
+    gpio_reset_pin(GPIO_NUM_15);
+
+    // Now setup actual LED pin
+    gpio_reset_pin((gpio_num_t)LED_STRIP_PIN);
+
+    show_debug_screen("GPIO Test", "Complete!", "Starting LED...");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+}
+
 void led_strip_init() {
+    // GPIO test removed - confirmed working with GPIO15
+
+    // Step 1: Show which GPIO
+    snprintf(debug_line1, sizeof(debug_line1), "LED Strip Debug");
+    snprintf(debug_line2, sizeof(debug_line2), "GPIO: %d", LED_STRIP_PIN);
+    snprintf(debug_line3, sizeof(debug_line3), "Step 1: Config");
+    show_debug_screen(debug_line1, debug_line2, debug_line3);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
     led_strip_config_t strip_config = {
         .strip_gpio_num = LED_STRIP_PIN,
         .max_leds = LED_STRIP_MAX_LEDS,
@@ -214,15 +320,62 @@ void led_strip_init() {
         .flags = { .invert_out = false }
     };
 
+    // Step 2: RMT config
+    snprintf(debug_line3, sizeof(debug_line3), "Step 2: RMT Init");
+    show_debug_screen(debug_line1, debug_line2, debug_line3);
+    vTaskDelay(pdMS_TO_TICKS(500));
+
     led_strip_rmt_config_t rmt_config = {
         .clk_src = RMT_CLK_SRC_DEFAULT,
-        .resolution_hz = 10 * 1000 * 1000, // 10MHz
+        .resolution_hz = 10 * 1000 * 1000,
         .mem_block_symbols = 64,
         .flags = { .with_dma = false }
     };
 
-    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip));
-    led_strip_clear(led_strip);
+    esp_err_t ret = led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip);
+
+    // Step 3: Check result
+    if (ret != ESP_OK) {
+        snprintf(debug_line2, sizeof(debug_line2), "ERROR!");
+        snprintf(debug_line3, sizeof(debug_line3), "%s", esp_err_to_name(ret));
+        show_debug_screen(debug_line1, debug_line2, debug_line3);
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        return;
+    }
+
+    snprintf(debug_line3, sizeof(debug_line3), "Step 3: RMT OK!");
+    show_debug_screen(debug_line1, debug_line2, debug_line3);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    // Step 4: Set pixels
+    snprintf(debug_line3, sizeof(debug_line3), "Step 4: Set RGB");
+    show_debug_screen(debug_line1, debug_line2, debug_line3);
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    led_strip_set_pixel(led_strip, 0, 255, 0, 0);    // Red
+    led_strip_set_pixel(led_strip, 1, 0, 255, 0);    // Green
+    led_strip_set_pixel(led_strip, 2, 0, 0, 255);    // Blue
+
+    // Step 5: Refresh
+    snprintf(debug_line3, sizeof(debug_line3), "Step 5: Refresh");
+    show_debug_screen(debug_line1, debug_line2, debug_line3);
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    esp_err_t ref_ret = led_strip_refresh(led_strip);
+
+    if (ref_ret != ESP_OK) {
+        snprintf(debug_line2, sizeof(debug_line2), "Refresh Error!");
+        snprintf(debug_line3, sizeof(debug_line3), "%s", esp_err_to_name(ref_ret));
+        show_debug_screen(debug_line1, debug_line2, debug_line3);
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        return;
+    }
+
+    // Step 6: Done
+    snprintf(debug_line2, sizeof(debug_line2), "GPIO%d: ALL OK", LED_STRIP_PIN);
+    snprintf(debug_line3, sizeof(debug_line3), "LED should be ON");
+    show_debug_screen(debug_line1, debug_line2, debug_line3);
+    vTaskDelay(pdMS_TO_TICKS(3000));
 }
 
 void update_leds() {
@@ -702,7 +855,15 @@ extern "C" void app_main(void) {
     // Initialize buzzer
     buzzer_init();
 
-    // Initialize LED strip
+    // Initialize WiFi first (so OTA works during GPIO test)
+    wifi_init();
+    start_ota_server();
+
+    // Wait for WiFi connection
+    show_debug_screen("WiFi", "Connecting...", "Please wait");
+    vTaskDelay(pdMS_TO_TICKS(3000));
+
+    // Initialize LED strip (includes GPIO test)
     led_strip_init();
 
     // Initialize encoder
@@ -727,10 +888,6 @@ extern "C" void app_main(void) {
     gpio_install_isr_service(0);
     gpio_isr_handler_add((gpio_num_t)ENCODER_A_PIN, encoder_isr, NULL);
     gpio_isr_handler_add((gpio_num_t)ENCODER_B_PIN, encoder_isr, NULL);
-
-    // Initialize WiFi
-    wifi_init();
-    start_ota_server();
 
     // Initial beep
     buzzer_beep(1000, 100);
