@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "esp_log.h"
 
 #define LGFX_USE_V1
@@ -30,6 +31,9 @@ static const char *TAG = "M5Dial-Hello";
 #define ENCODER_A_PIN 41
 #define ENCODER_B_PIN 40
 #define ENCODER_BTN_PIN 42
+
+// Buzzer Pin Definition
+#define BUZZER_PIN 3
 
 // M5Dial Display Class
 class LGFX_M5Dial : public lgfx::LGFX_Device {
@@ -98,33 +102,96 @@ public:
 
 // Global instances
 LGFX_M5Dial display;
+LGFX_Sprite canvas(&display);  // Off-screen buffer
 int32_t counter = 0;
 int32_t last_encoder_value = 0;
 
 // Encoder interrupt variables
 volatile int32_t encoder_count = 0;
+volatile int32_t encoder_raw = 0;
+static int8_t last_state = 0;
 
-// Encoder ISR
-static void IRAM_ATTR encoder_a_isr(void* arg) {
-    int b_state = gpio_get_level((gpio_num_t)ENCODER_B_PIN);
-    if (b_state == 0) {
-        encoder_count++;
-    } else {
-        encoder_count--;
-    }
+// Quadrature state table: [last_state][current_state] -> direction (-1, 0, +1)
+// States: 00=0, 01=1, 11=2, 10=3 (Gray code order)
+static const int8_t quad_table[4][4] = {
+    // to:  0   1   2   3   from:
+    {  0, +1,  0, -1 },  // 0
+    { -1,  0, +1,  0 },  // 1
+    {  0, -1,  0, +1 },  // 2
+    { +1,  0, -1,  0 },  // 3
+};
+
+// Encoder ISR - Quadrature decoding
+static void IRAM_ATTR encoder_isr(void* arg) {
+    int a = gpio_get_level((gpio_num_t)ENCODER_A_PIN);
+    int b = gpio_get_level((gpio_num_t)ENCODER_B_PIN);
+
+    // Convert to Gray code state (0,1,3,2 -> 0,1,2,3)
+    int8_t state = (a << 1) | (a ^ b);
+
+    // Get direction from state transition
+    int8_t dir = quad_table[last_state][state];
+    encoder_raw += dir;
+    last_state = state;
+
+    // Convert raw count to detent count (4 pulses per detent)
+    encoder_count = encoder_raw / 4;
 }
+
+// Buzzer request flags (set in ISR, processed in main loop)
+volatile bool buzzer_click_request = false;
+volatile bool buzzer_reset_request = false;
 
 // Button ISR
 static void IRAM_ATTR button_isr(void* arg) {
     counter = 0;
     encoder_count = 0;
+    encoder_raw = 0;
+    buzzer_reset_request = true;
+}
+
+// Initialize Buzzer
+void buzzer_init() {
+    ledc_timer_config_t timer_conf = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_10_BIT,
+        .timer_num = LEDC_TIMER_0,
+        .freq_hz = 4000,
+        .clk_cfg = LEDC_AUTO_CLK
+    };
+    ledc_timer_config(&timer_conf);
+
+    ledc_channel_config_t channel_conf = {
+        .gpio_num = BUZZER_PIN,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel = LEDC_CHANNEL_0,
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = LEDC_TIMER_0,
+        .duty = 0,
+        .hpoint = 0
+    };
+    ledc_channel_config(&channel_conf);
+
+    ESP_LOGI(TAG, "Buzzer initialized");
+}
+
+// Play a short beep
+void buzzer_beep(uint32_t freq, uint32_t duration_ms) {
+    ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, freq);
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 512);  // 50% duty
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+
+    vTaskDelay(pdMS_TO_TICKS(duration_ms));
+
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
 
 // Initialize Encoder
 void encoder_init() {
-    // Configure encoder pins as input with pull-up
+    // Configure encoder pins as input with pull-up, trigger on any edge
     gpio_config_t io_conf = {};
-    io_conf.intr_type = GPIO_INTR_NEGEDGE;
+    io_conf.intr_type = GPIO_INTR_ANYEDGE;
     io_conf.mode = GPIO_MODE_INPUT;
     io_conf.pin_bit_mask = (1ULL << ENCODER_A_PIN) | (1ULL << ENCODER_B_PIN);
     io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
@@ -136,38 +203,47 @@ void encoder_init() {
     io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
     gpio_config(&io_conf);
 
+    // Initialize last state
+    int a = gpio_get_level((gpio_num_t)ENCODER_A_PIN);
+    int b = gpio_get_level((gpio_num_t)ENCODER_B_PIN);
+    last_state = (a << 1) | (a ^ b);
+
     // Install GPIO ISR service
     gpio_install_isr_service(0);
-    gpio_isr_handler_add((gpio_num_t)ENCODER_A_PIN, encoder_a_isr, NULL);
+    gpio_isr_handler_add((gpio_num_t)ENCODER_A_PIN, encoder_isr, NULL);
+    gpio_isr_handler_add((gpio_num_t)ENCODER_B_PIN, encoder_isr, NULL);
     gpio_isr_handler_add((gpio_num_t)ENCODER_BTN_PIN, button_isr, NULL);
 
     ESP_LOGI(TAG, "Encoder initialized");
 }
 
-// Update Display
+// Update Display (using sprite for flicker-free rendering)
 void update_display() {
-    display.fillScreen(TFT_BLACK);
+    canvas.fillScreen(TFT_BLACK);
 
     // Draw title
-    display.setTextColor(TFT_WHITE);
-    display.setTextDatum(MC_DATUM);
-    display.setFont(&fonts::FreeSansBold18pt7b);
-    display.drawString("Hello World", 120, 60);
+    canvas.setTextColor(TFT_WHITE);
+    canvas.setTextDatum(MC_DATUM);
+    canvas.setFont(&fonts::FreeSansBold18pt7b);
+    canvas.drawString("Hello World", 120, 60);
 
     // Draw counter label
-    display.setFont(&fonts::FreeSans12pt7b);
-    display.drawString("Counter:", 120, 120);
+    canvas.setFont(&fonts::FreeSans12pt7b);
+    canvas.drawString("Counter:", 120, 120);
 
     // Draw counter value
-    display.setFont(&fonts::FreeSansBold24pt7b);
-    display.setTextColor(TFT_CYAN);
-    display.drawNumber(counter, 120, 160);
+    canvas.setFont(&fonts::FreeSansBold24pt7b);
+    canvas.setTextColor(TFT_CYAN);
+    canvas.drawNumber(counter, 120, 160);
 
     // Draw instruction
-    display.setFont(&fonts::Font0);
-    display.setTextColor(TFT_LIGHTGREY);
-    display.drawString("Rotate: Change", 120, 200);
-    display.drawString("Press: Reset", 120, 215);
+    canvas.setFont(&fonts::Font0);
+    canvas.setTextColor(TFT_LIGHTGREY);
+    canvas.drawString("Rotate: Change", 120, 200);
+    canvas.drawString("Press: Reset", 120, 215);
+
+    // Push to display in one go
+    canvas.pushSprite(0, 0);
 }
 
 extern "C" void app_main(void) {
@@ -178,7 +254,13 @@ extern "C" void app_main(void) {
     display.setBrightness(128);
     display.setRotation(0);
 
+    // Create sprite buffer (240x240, 16-bit color)
+    canvas.createSprite(240, 240);
+
     ESP_LOGI(TAG, "Display initialized");
+
+    // Initialize Buzzer
+    buzzer_init();
 
     // Initialize Encoder
     encoder_init();
@@ -186,19 +268,30 @@ extern "C" void app_main(void) {
     // Initial display
     update_display();
 
+    // Startup sound
+    buzzer_beep(2000, 50);
+
     ESP_LOGI(TAG, "Entering main loop");
 
     // Main loop
     while (1) {
+        // Check for buzzer requests
+        if (buzzer_reset_request) {
+            buzzer_reset_request = false;
+            buzzer_beep(1000, 100);  // Lower tone for reset
+            update_display();
+        }
+
         // Check if encoder value changed
         int32_t current_encoder = encoder_count;
         if (current_encoder != last_encoder_value) {
             counter = current_encoder;
             last_encoder_value = current_encoder;
             update_display();
+            buzzer_beep(4000, 10);  // Short click sound
             ESP_LOGI(TAG, "Counter: %ld", counter);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
