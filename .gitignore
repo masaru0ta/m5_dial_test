@@ -2,6 +2,11 @@
 build/
 */build/
 
+# WiFi credentials (sensitive)
+wifi_credentials.h
+*/wifi_credentials.h
+**/wifi_credentials.h
+
 # ESP-IDF managed components
 managed_components/
 */managed_components/

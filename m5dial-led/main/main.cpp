@@ -205,113 +205,7 @@ void hsv_to_rgb(uint16_t h, uint8_t s, uint8_t v, uint8_t *r, uint8_t *g, uint8_
 
 // ===== LED Strip Functions =====
 
-// Debug info displayed on screen
-static char debug_line1[32] = "";
-static char debug_line2[32] = "";
-static char debug_line3[32] = "";
-
-void show_debug_screen(const char* line1, const char* line2, const char* line3) {
-    canvas.fillScreen(TFT_BLACK);
-    canvas.setTextDatum(MC_DATUM);
-
-    // Line 1 - Large
-    canvas.setFont(&fonts::Font4);
-    canvas.setTextColor(TFT_WHITE);
-    canvas.drawString(line1, 120, 60);
-
-    // Line 2 - Extra Large
-    canvas.setFont(&fonts::lgfxJapanGothicP_32);
-    canvas.setTextColor(TFT_GREEN);
-    canvas.drawString(line2, 120, 120);
-
-    // Line 3 - Medium
-    canvas.setFont(&fonts::Font4);
-    canvas.setTextColor(TFT_YELLOW);
-    canvas.drawString(line3, 120, 180);
-
-    canvas.pushSprite(0, 0);
-}
-
-bool wait_for_button_press() {
-    // Wait for button release first (if pressed)
-    while (gpio_get_level((gpio_num_t)ENCODER_BTN_PIN) == 0) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    // Wait for button press
-    while (gpio_get_level((gpio_num_t)ENCODER_BTN_PIN) == 1) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    vTaskDelay(pdMS_TO_TICKS(200));  // Debounce
-    return true;
-}
-
-void gpio_voltage_test() {
-    // Configure button input first
-    gpio_config_t btn_conf = {
-        .pin_bit_mask = (1ULL << ENCODER_BTN_PIN),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    gpio_config(&btn_conf);
-
-    // Set BOTH GPIO13 and GPIO15 to HIGH at the same time
-    // Port A: Yellow=GPIO13(SDA), White=GPIO15(SCL)
-
-    gpio_reset_pin(GPIO_NUM_13);
-    gpio_reset_pin(GPIO_NUM_15);
-
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << GPIO_NUM_13) | (1ULL << GPIO_NUM_15),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,  // Enable internal pull-up
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    esp_err_t ret = gpio_config(&io_conf);
-
-    char msg[64];
-    if (ret != ESP_OK) {
-        snprintf(msg, sizeof(msg), "Config Error: %s", esp_err_to_name(ret));
-        show_debug_screen("GPIO FAIL", msg, "Press button");
-        wait_for_button_press();
-    } else {
-        // Set both HIGH
-        gpio_set_level(GPIO_NUM_13, 1);
-        gpio_set_level(GPIO_NUM_15, 1);
-
-        show_debug_screen("BOTH GPIO HIGH", "G13+G15=3.3V", "Measure Y & W");
-        wait_for_button_press();
-
-        // Set both LOW
-        gpio_set_level(GPIO_NUM_13, 0);
-        gpio_set_level(GPIO_NUM_15, 0);
-
-        show_debug_screen("BOTH GPIO LOW", "G13+G15=0V", "Measure Y & W");
-        wait_for_button_press();
-    }
-
-    gpio_reset_pin(GPIO_NUM_13);
-    gpio_reset_pin(GPIO_NUM_15);
-
-    // Now setup actual LED pin
-    gpio_reset_pin((gpio_num_t)LED_STRIP_PIN);
-
-    show_debug_screen("GPIO Test", "Complete!", "Starting LED...");
-    vTaskDelay(pdMS_TO_TICKS(1000));
-}
-
 void led_strip_init() {
-    // GPIO test removed - confirmed working with GPIO15
-
-    // Step 1: Show which GPIO
-    snprintf(debug_line1, sizeof(debug_line1), "LED Strip Debug");
-    snprintf(debug_line2, sizeof(debug_line2), "GPIO: %d", LED_STRIP_PIN);
-    snprintf(debug_line3, sizeof(debug_line3), "Step 1: Config");
-    show_debug_screen(debug_line1, debug_line2, debug_line3);
-    vTaskDelay(pdMS_TO_TICKS(1000));
-
     led_strip_config_t strip_config = {
         .strip_gpio_num = LED_STRIP_PIN,
         .max_leds = LED_STRIP_MAX_LEDS,
@@ -319,11 +213,6 @@ void led_strip_init() {
         .led_model = LED_MODEL_WS2812,
         .flags = { .invert_out = false }
     };
-
-    // Step 2: RMT config
-    snprintf(debug_line3, sizeof(debug_line3), "Step 2: RMT Init");
-    show_debug_screen(debug_line1, debug_line2, debug_line3);
-    vTaskDelay(pdMS_TO_TICKS(500));
 
     led_strip_rmt_config_t rmt_config = {
         .clk_src = RMT_CLK_SRC_DEFAULT,
@@ -333,49 +222,14 @@ void led_strip_init() {
     };
 
     esp_err_t ret = led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip);
-
-    // Step 3: Check result
     if (ret != ESP_OK) {
-        snprintf(debug_line2, sizeof(debug_line2), "ERROR!");
-        snprintf(debug_line3, sizeof(debug_line3), "%s", esp_err_to_name(ret));
-        show_debug_screen(debug_line1, debug_line2, debug_line3);
-        vTaskDelay(pdMS_TO_TICKS(3000));
+        ESP_LOGE(TAG, "LED strip init failed: %s", esp_err_to_name(ret));
         return;
     }
 
-    snprintf(debug_line3, sizeof(debug_line3), "Step 3: RMT OK!");
-    show_debug_screen(debug_line1, debug_line2, debug_line3);
-    vTaskDelay(pdMS_TO_TICKS(1000));
-
-    // Step 4: Set pixels
-    snprintf(debug_line3, sizeof(debug_line3), "Step 4: Set RGB");
-    show_debug_screen(debug_line1, debug_line2, debug_line3);
-    vTaskDelay(pdMS_TO_TICKS(500));
-
-    led_strip_set_pixel(led_strip, 0, 255, 0, 0);    // Red
-    led_strip_set_pixel(led_strip, 1, 0, 255, 0);    // Green
-    led_strip_set_pixel(led_strip, 2, 0, 0, 255);    // Blue
-
-    // Step 5: Refresh
-    snprintf(debug_line3, sizeof(debug_line3), "Step 5: Refresh");
-    show_debug_screen(debug_line1, debug_line2, debug_line3);
-    vTaskDelay(pdMS_TO_TICKS(500));
-
-    esp_err_t ref_ret = led_strip_refresh(led_strip);
-
-    if (ref_ret != ESP_OK) {
-        snprintf(debug_line2, sizeof(debug_line2), "Refresh Error!");
-        snprintf(debug_line3, sizeof(debug_line3), "%s", esp_err_to_name(ref_ret));
-        show_debug_screen(debug_line1, debug_line2, debug_line3);
-        vTaskDelay(pdMS_TO_TICKS(3000));
-        return;
-    }
-
-    // Step 6: Done
-    snprintf(debug_line2, sizeof(debug_line2), "GPIO%d: ALL OK", LED_STRIP_PIN);
-    snprintf(debug_line3, sizeof(debug_line3), "LED should be ON");
-    show_debug_screen(debug_line1, debug_line2, debug_line3);
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    // Clear LEDs on init
+    led_strip_clear(led_strip);
+    led_strip_refresh(led_strip);
 }
 
 void update_leds() {
@@ -467,30 +321,24 @@ void update_leds() {
 }
 
 // ===== Encoder ISR =====
+// Count only on detent (1 click = 1 step)
+// Direction determined by final transition into state 00
 
 static void IRAM_ATTR encoder_isr(void *arg) {
     uint8_t a = gpio_get_level((gpio_num_t)ENCODER_A_PIN);
     uint8_t b = gpio_get_level((gpio_num_t)ENCODER_B_PIN);
     int8_t state = (a << 1) | b;
 
-    int8_t dir = 0;
-    if (last_state == 0b00) {
-        if (state == 0b01) dir = 1;
-        else if (state == 0b10) dir = -1;
-    } else if (last_state == 0b01) {
-        if (state == 0b11) dir = 1;
-        else if (state == 0b00) dir = -1;
-    } else if (last_state == 0b11) {
-        if (state == 0b10) dir = 1;
-        else if (state == 0b01) dir = -1;
-    } else if (last_state == 0b10) {
-        if (state == 0b00) dir = 1;
-        else if (state == 0b11) dir = -1;
+    // Only count when returning to detent (00)
+    // Direction is determined by which state we came from
+    if (state == 0b00) {
+        if (last_state == 0b10) {
+            encoder_count++;   // Clockwise: 10 -> 00
+        } else if (last_state == 0b01) {
+            encoder_count--;   // Counter-clockwise: 01 -> 00
+        }
     }
 
-    if (dir != 0) {
-        encoder_count += dir;
-    }
     last_state = state;
 }
 
@@ -559,133 +407,144 @@ void buzzer_beep(uint32_t freq, uint32_t duration_ms) {
 
 // ===== Display =====
 
-// Christmas colors
-#define XMAS_RED     0xC800   // Deep red
-#define XMAS_GREEN   0x0400   // Deep green
-#define XMAS_GOLD    0xFE60   // Gold
-#define XMAS_WHITE   0xFFFF   // Snow white
-#define XMAS_DARKGRN 0x0200   // Dark green for background
+// Simple UI colors
+#define UI_BLACK   0x0000
+#define UI_WHITE   0xFFFF
+#define UI_GRAY    0x8410
 
-static uint32_t snow_counter = 0;
+// UI state: false = Layer 1 (menu select), true = Layer 2 (value adjust)
+static bool in_adjustment_mode = false;
 
-void draw_snowflake(int x, int y, int size, uint16_t color) {
-    canvas.drawLine(x - size, y, x + size, y, color);
-    canvas.drawLine(x, y - size, x, y + size, color);
-    canvas.drawLine(x - size*2/3, y - size*2/3, x + size*2/3, y + size*2/3, color);
-    canvas.drawLine(x + size*2/3, y - size*2/3, x - size*2/3, y + size*2/3, color);
+// Circle parameters
+#define CIRCLE_CENTER_X  120
+#define CIRCLE_CENTER_Y  120
+#define CIRCLE_RADIUS    90
+#define DOT_RADIUS_SMALL 5
+#define DOT_RADIUS_LARGE 8
+
+// Draw a dot at angle position on the circle
+void draw_circle_dot(float angle_deg, int radius, bool is_large, bool is_filled) {
+    float angle_rad = (angle_deg - 90) * 3.14159f / 180.0f;  // -90 to start from top
+    int x = CIRCLE_CENTER_X + (int)(cos(angle_rad) * radius);
+    int y = CIRCLE_CENTER_Y + (int)(sin(angle_rad) * radius);
+    int dot_r = is_large ? DOT_RADIUS_LARGE : DOT_RADIUS_SMALL;
+
+    if (is_filled) {
+        canvas.fillCircle(x, y, dot_r, UI_WHITE);
+    } else {
+        canvas.drawCircle(x, y, dot_r, UI_WHITE);
+    }
 }
 
-void draw_star(int x, int y, int size, uint16_t color) {
-    canvas.fillTriangle(x, y - size, x - size/3, y + size/3, x + size/3, y + size/3, color);
-    canvas.fillTriangle(x, y + size/2, x - size/3, y - size/4, x + size/3, y - size/4, color);
+// Draw Layer 1: Menu Selection
+void draw_menu_select() {
+    canvas.fillScreen(UI_BLACK);
+
+    // Draw circle outline
+    canvas.drawCircle(CIRCLE_CENTER_X, CIRCLE_CENTER_Y, CIRCLE_RADIUS, UI_WHITE);
+
+    // Draw menu dots (5 items evenly spaced)
+    for (int i = 0; i < MODE_MAX; i++) {
+        float angle = (360.0f / MODE_MAX) * i;
+        bool is_selected = (i == current_mode);
+        draw_circle_dot(angle, CIRCLE_RADIUS, is_selected, is_selected);
+    }
+
+    // Center: Current menu name
+    canvas.setTextDatum(MC_DATUM);
+    canvas.setFont(&fonts::lgfxJapanGothicP_28);
+    canvas.setTextColor(UI_WHITE);
+    canvas.drawString(mode_names[current_mode], CIRCLE_CENTER_X, CIRCLE_CENTER_Y);
+
+    // Bottom: "変更"
+    canvas.setFont(&fonts::lgfxJapanGothicP_16);
+    canvas.setTextColor(UI_GRAY);
+    canvas.drawString("変更", CIRCLE_CENTER_X, 200);
+}
+
+// Arc parameters for Layer 2
+#define ARC_START_ANGLE  135   // Left end (0%)
+#define ARC_END_ANGLE    45    // Right end (100%)
+#define ARC_SPAN         270   // Total arc span (going over the top)
+
+// Draw Layer 2: Value Adjustment
+void draw_value_adjust() {
+    canvas.fillScreen(UI_BLACK);
+
+    // Draw arc (open at bottom): from 135° to 45° going through top
+    // LovyanGFX drawArc: x, y, r1, r2, angle1, angle2
+    canvas.drawArc(CIRCLE_CENTER_X, CIRCLE_CENTER_Y, CIRCLE_RADIUS - 1, CIRCLE_RADIUS + 1,
+                   ARC_START_ANGLE, 360, UI_WHITE);  // 135° to 360°
+    canvas.drawArc(CIRCLE_CENTER_X, CIRCLE_CENTER_Y, CIRCLE_RADIUS - 1, CIRCLE_RADIUS + 1,
+                   0, ARC_END_ANGLE, UI_WHITE);       // 0° to 45°
+
+    // Calculate current value as percentage (0.0 - 1.0)
+    float value_pct = 0.0f;
+    char value_str[32];
+
+    switch (current_mode) {
+        case MODE_HUE:
+            value_pct = led_hue / 360.0f;
+            snprintf(value_str, sizeof(value_str), "%d°", led_hue);
+            break;
+        case MODE_SATURATION:
+            value_pct = led_saturation / 255.0f;
+            snprintf(value_str, sizeof(value_str), "%d%%", led_saturation * 100 / 255);
+            break;
+        case MODE_BRIGHTNESS:
+            value_pct = led_brightness / 255.0f;
+            snprintf(value_str, sizeof(value_str), "%d%%", led_brightness * 100 / 255);
+            break;
+        case MODE_COUNT:
+            value_pct = (led_count - 1) / (float)(LED_STRIP_MAX_LEDS - 1);
+            snprintf(value_str, sizeof(value_str), "%d", led_count);
+            break;
+        case MODE_EFFECT:
+            value_pct = led_effect / (float)(NUM_EFFECTS - 1);
+            snprintf(value_str, sizeof(value_str), "%s", effect_names[led_effect]);
+            break;
+        default:
+            value_str[0] = '\0';
+    }
+
+    // Draw position dot on arc
+    // Map value_pct (0-1) to angle: 0% = 135°, 100% = 45° (going through 270°/top)
+    float angle_deg = ARC_START_ANGLE + value_pct * ARC_SPAN;  // 135 + pct * 270
+    if (angle_deg >= 360) angle_deg -= 360;
+
+    float angle_rad = angle_deg * 3.14159f / 180.0f;
+    int dot_x = CIRCLE_CENTER_X + (int)(cos(angle_rad) * CIRCLE_RADIUS);
+    int dot_y = CIRCLE_CENTER_Y + (int)(sin(angle_rad) * CIRCLE_RADIUS);
+    canvas.fillCircle(dot_x, dot_y, DOT_RADIUS_LARGE, UI_WHITE);
+
+    // Center: Menu name + value
+    canvas.setTextDatum(MC_DATUM);
+    canvas.setFont(&fonts::lgfxJapanGothicP_20);
+    canvas.setTextColor(UI_WHITE);
+    canvas.drawString(mode_names[current_mode], CIRCLE_CENTER_X, CIRCLE_CENTER_Y - 15);
+
+    canvas.setFont(&fonts::lgfxJapanGothicP_28);
+    canvas.drawString(value_str, CIRCLE_CENTER_X, CIRCLE_CENTER_Y + 20);
+
+    // Bottom: "決定"
+    canvas.setFont(&fonts::lgfxJapanGothicP_16);
+    canvas.setTextColor(UI_GRAY);
+    canvas.drawString("決定", CIRCLE_CENTER_X, 200);
 }
 
 void update_display() {
-    snow_counter++;
-
-    // Dark green background
-    canvas.fillScreen(XMAS_DARKGRN);
-
-    // Draw snowflakes animation
-    for (int i = 0; i < 8; i++) {
-        int x = (i * 37 + snow_counter) % 240;
-        int y = (i * 53 + snow_counter * 2) % 240;
-        draw_snowflake(x, y, 4, 0x8410);  // Gray snowflakes
-    }
-
     if (ota_in_progress) {
-        canvas.setTextColor(XMAS_GOLD);
+        canvas.fillScreen(UI_BLACK);
+        canvas.setTextColor(UI_WHITE);
         canvas.setTextDatum(MC_DATUM);
         canvas.setFont(&fonts::lgfxJapanGothicP_20);
         canvas.drawString("更新中...", 120, 100);
-        canvas.drawRect(30, 120, 180, 20, XMAS_WHITE);
-        canvas.fillRect(32, 122, (176 * ota_progress) / 100, 16, XMAS_RED);
+        canvas.drawRoundRect(40, 130, 160, 12, 6, UI_WHITE);
+        canvas.fillRoundRect(42, 132, (156 * ota_progress) / 100, 8, 4, UI_WHITE);
+    } else if (in_adjustment_mode) {
+        draw_value_adjust();
     } else {
-        // Stars decoration at top
-        draw_star(120, 18, 10, XMAS_GOLD);
-        draw_star(70, 35, 6, XMAS_GOLD);
-        draw_star(170, 35, 6, XMAS_GOLD);
-
-        // Title with Christmas style
-        canvas.setTextDatum(TC_DATUM);
-        canvas.setFont(&fonts::lgfxJapanGothicP_20);
-        canvas.setTextColor(XMAS_GOLD);
-        canvas.drawString("Merry Xmas!", 120, 38);
-
-        // Current color preview (ornament style)
-        uint8_t r, g, b;
-        if (led_on) {
-            hsv_to_rgb(led_hue, led_saturation, led_brightness, &r, &g, &b);
-        } else {
-            r = g = b = 0;
-        }
-        uint16_t preview_color = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-
-        // Ornament hook
-        canvas.drawLine(120, 60, 120, 70, XMAS_GOLD);
-        canvas.drawCircle(120, 58, 3, XMAS_GOLD);
-
-        // Ornament ball
-        canvas.fillCircle(120, 95, 25, preview_color);
-        canvas.drawCircle(120, 95, 26, XMAS_GOLD);
-        canvas.drawCircle(120, 95, 27, XMAS_GOLD);
-
-        // Shine effect on ornament
-        canvas.fillCircle(112, 87, 5, 0xFFFF);
-        canvas.fillCircle(114, 89, 2, 0xFFFF);
-
-        // LED status inside ornament
-        canvas.setFont(&fonts::lgfxJapanGothicP_12);
-        canvas.setTextDatum(MC_DATUM);
-        if (led_on) {
-            canvas.setTextColor(XMAS_WHITE);
-            canvas.drawString("ON", 120, 98);
-        } else {
-            canvas.setTextColor(0x8410);
-            canvas.drawString("OFF", 120, 98);
-        }
-
-        // Mode indicator with Christmas ribbon style
-        canvas.fillRect(50, 132, 140, 24, XMAS_RED);
-        canvas.fillTriangle(50, 132, 40, 144, 50, 156, XMAS_RED);
-        canvas.fillTriangle(190, 132, 200, 144, 190, 156, XMAS_RED);
-
-        canvas.setFont(&fonts::lgfxJapanGothicP_16);
-        canvas.setTextDatum(MC_DATUM);
-        canvas.setTextColor(XMAS_WHITE);
-        canvas.drawString(mode_names[current_mode], 120, 144);
-
-        // Current value display
-        canvas.setFont(&fonts::lgfxJapanGothicP_24);
-        canvas.setTextColor(XMAS_WHITE);
-        char value_str[32];
-        switch (current_mode) {
-            case MODE_HUE:
-                snprintf(value_str, sizeof(value_str), "%d°", led_hue);
-                break;
-            case MODE_SATURATION:
-                snprintf(value_str, sizeof(value_str), "%d%%", led_saturation * 100 / 255);
-                break;
-            case MODE_BRIGHTNESS:
-                snprintf(value_str, sizeof(value_str), "%d%%", led_brightness * 100 / 255);
-                break;
-            case MODE_COUNT:
-                snprintf(value_str, sizeof(value_str), "%d個", led_count);
-                break;
-            case MODE_EFFECT:
-                snprintf(value_str, sizeof(value_str), "%s", effect_names[led_effect]);
-                break;
-            default:
-                value_str[0] = '\0';
-        }
-        canvas.drawString(value_str, 120, 175);
-
-        // Instructions with festive colors
-        canvas.setFont(&fonts::lgfxJapanGothicP_12);
-        canvas.setTextColor(XMAS_GREEN + 0x03E0);  // Brighter green
-        canvas.drawString("回転:調整 / 押す:切替", 120, 203);
-        canvas.setTextColor(XMAS_RED + 0x4000);  // Brighter red
-        canvas.drawString("長押し:点灯/消灯", 120, 218);
+        draw_menu_select();
     }
 
     canvas.pushSprite(0, 0);
@@ -855,15 +714,11 @@ extern "C" void app_main(void) {
     // Initialize buzzer
     buzzer_init();
 
-    // Initialize WiFi first (so OTA works during GPIO test)
+    // Initialize WiFi and OTA server
     wifi_init();
     start_ota_server();
 
-    // Wait for WiFi connection
-    show_debug_screen("WiFi", "Connecting...", "Please wait");
-    vTaskDelay(pdMS_TO_TICKS(3000));
-
-    // Initialize LED strip (includes GPIO test)
+    // Initialize LED strip
     led_strip_init();
 
     // Initialize encoder
@@ -893,7 +748,6 @@ extern "C" void app_main(void) {
     buzzer_beep(1000, 100);
 
     int32_t last_encoder = 0;
-    static bool toggle_triggered = false;
 
     // Main loop
     while (1) {
@@ -905,20 +759,17 @@ extern "C" void app_main(void) {
             continue;
         }
 
-        // Handle mode change (short press)
+        // Handle button press
         if (was_short_press()) {
-            current_mode = (ControlMode)((current_mode + 1) % MODE_MAX);
-            buzzer_beep(1500, 30);
-        }
-
-        // Handle LED toggle (long press)
-        if (is_button_held() && !toggle_triggered) {
-            led_on = !led_on;
-            toggle_triggered = true;
-            buzzer_beep(led_on ? 2000 : 500, 100);
-        }
-        if (!last_button_state) {
-            toggle_triggered = false;
+            if (in_adjustment_mode) {
+                // Layer 2 -> Layer 1: Confirm and go back
+                in_adjustment_mode = false;
+                buzzer_beep(1000, 30);
+            } else {
+                // Layer 1 -> Layer 2: Enter adjustment mode
+                in_adjustment_mode = true;
+                buzzer_beep(1500, 30);
+            }
         }
 
         // Handle encoder rotation
@@ -927,28 +778,35 @@ extern "C" void app_main(void) {
             int diff = current_encoder - last_encoder;
             last_encoder = current_encoder;
 
-            switch (current_mode) {
-                case MODE_HUE:
-                    led_hue = (led_hue + diff * 5 + 360) % 360;
-                    break;
-                case MODE_SATURATION:
-                    led_saturation = (uint8_t)MAX(0, MIN(255, led_saturation + diff * 8));
-                    break;
-                case MODE_BRIGHTNESS:
-                    led_brightness = (uint8_t)MAX(0, MIN(255, led_brightness + diff * 8));
-                    break;
-                case MODE_COUNT:
-                    led_count = (uint8_t)MAX(1, MIN(LED_STRIP_MAX_LEDS, led_count + diff));
-                    break;
-                case MODE_EFFECT:
-                    led_effect = (led_effect + diff + NUM_EFFECTS) % NUM_EFFECTS;
-                    break;
-                default:
-                    break;
+            if (in_adjustment_mode) {
+                // Layer 2: Adjust value
+                switch (current_mode) {
+                    case MODE_HUE:
+                        led_hue = (led_hue + diff * 10 + 360) % 360;
+                        break;
+                    case MODE_SATURATION:
+                        led_saturation = (uint8_t)MAX(0, MIN(255, led_saturation + diff * 8));
+                        break;
+                    case MODE_BRIGHTNESS:
+                        led_brightness = (uint8_t)MAX(0, MIN(255, led_brightness + diff * 8));
+                        break;
+                    case MODE_COUNT:
+                        led_count = (uint8_t)MAX(1, MIN(LED_STRIP_MAX_LEDS, led_count + diff));
+                        break;
+                    case MODE_EFFECT:
+                        led_effect = (led_effect + diff + NUM_EFFECTS) % NUM_EFFECTS;
+                        break;
+                    default:
+                        break;
+                }
+            } else {
+                // Layer 1: Change menu selection
+                int new_mode = (current_mode + diff + MODE_MAX) % MODE_MAX;
+                current_mode = (ControlMode)new_mode;
             }
         }
 
-        // Update LEDs
+        // Update LEDs (always on for now, can add on/off later)
         update_leds();
 
         // Update display
