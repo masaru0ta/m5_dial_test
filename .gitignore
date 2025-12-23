@@ -1,0 +1,28 @@
+# Build directories
+build/
+*/build/
+
+# ESP-IDF managed components
+managed_components/
+*/managed_components/
+
+# ESP-IDF dependencies
+dependencies.lock
+*/dependencies.lock
+
+# SDK config (keep sdkconfig.defaults, ignore generated sdkconfig)
+sdkconfig
+sdkconfig.old
+*/sdkconfig
+*/sdkconfig.old
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
