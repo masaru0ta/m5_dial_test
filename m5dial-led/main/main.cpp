@@ -63,7 +63,7 @@ static const char *TAG = "M5Dial-LED";
 
 // WS2812B Configuration
 #define LED_STRIP_PIN GPIO_NUM_15  // Grove Port A - GPIO15 (white wire / SCL)
-#define LED_STRIP_MAX_LEDS 60      // Maximum supported LEDs
+#define LED_STRIP_MAX_LEDS 150     // Maximum supported LEDs
 
 // M5Dial Display Class
 class LGFX_M5Dial : public lgfx::LGFX_Device {
@@ -127,35 +127,92 @@ uint8_t led_saturation = 255; // 0-255
 uint8_t led_brightness = 128; // 0-255
 uint8_t led_count = 10;       // How many LEDs to light
 uint8_t led_effect = 0;       // Current effect
+uint8_t effect_speed = 5;     // Effect speed 1-9 (1=slow, 9=fast)
+int16_t control_position = 0; // Interactive control position (0 to led_count-1, wraps)
+bool control_active = false;  // True when in control mode Layer 2
 bool led_on = true;           // LED on/off
 
 // Effect names (Japanese)
 const char* effect_names[] = {
     "単色",
-    "虹色",
-    "呼吸",
-    "追跡",
-    "キラキラ"
+    "追いかけ",
+    "往復",
+    "コメット",
+    "レインボー",
+    "ランダム",
+    "蛍",
+    "ランダム蛍",
+    "心拍",
+    "Xmas Song"
 };
-#define NUM_EFFECTS 5
+#define NUM_EFFECTS 10
+
+// Xmas Song melody data (Jingle Bells)
+// Note: frequency in Hz, 0 = rest
+struct MelodyNote {
+    uint16_t freq;    // Frequency in Hz
+    uint8_t duration; // Duration units (1 unit = base tempo)
+    uint16_t hue;     // Color hue for this note
+};
+
+// Note frequencies
+#define NOTE_C4  262
+#define NOTE_D4  294
+#define NOTE_E4  330
+#define NOTE_F4  349
+#define NOTE_G4  392
+#define NOTE_A4  440
+#define NOTE_B4  494
+#define NOTE_C5  523
+#define NOTE_REST 0
+
+// Jingle Bells melody with colors
+// Colors: C=Red, D=Orange, E=Yellow, F=Green, G=Cyan, A=Blue, B=Purple
+const MelodyNote xmas_melody[] = {
+    // "Jingle bells, jingle bells, jingle all the way"
+    {NOTE_E4, 1, 60},  {NOTE_E4, 1, 60},  {NOTE_E4, 2, 60},
+    {NOTE_E4, 1, 60},  {NOTE_E4, 1, 60},  {NOTE_E4, 2, 60},
+    {NOTE_E4, 1, 60},  {NOTE_G4, 1, 180}, {NOTE_C4, 1, 0},   {NOTE_D4, 1, 30}, {NOTE_E4, 2, 60},
+    {NOTE_REST, 1, 0},
+    // "Oh what fun it is to ride"
+    {NOTE_F4, 1, 120}, {NOTE_F4, 1, 120}, {NOTE_F4, 1, 120}, {NOTE_F4, 1, 120},
+    {NOTE_F4, 1, 120}, {NOTE_E4, 1, 60},  {NOTE_E4, 1, 60},  {NOTE_E4, 1, 60},
+    // "In a one-horse open sleigh"
+    {NOTE_E4, 1, 60},  {NOTE_D4, 1, 30},  {NOTE_D4, 1, 30},  {NOTE_E4, 1, 60}, {NOTE_D4, 2, 30},
+    {NOTE_G4, 2, 180},
+    {NOTE_REST, 2, 0},
+    // Repeat: "Jingle bells, jingle bells, jingle all the way"
+    {NOTE_E4, 1, 60},  {NOTE_E4, 1, 60},  {NOTE_E4, 2, 60},
+    {NOTE_E4, 1, 60},  {NOTE_E4, 1, 60},  {NOTE_E4, 2, 60},
+    {NOTE_E4, 1, 60},  {NOTE_G4, 1, 180}, {NOTE_C4, 1, 0},   {NOTE_D4, 1, 30}, {NOTE_E4, 2, 60},
+    {NOTE_REST, 1, 0},
+    // "Oh what fun it is to ride in a one-horse open sleigh"
+    {NOTE_F4, 1, 120}, {NOTE_F4, 1, 120}, {NOTE_F4, 1, 120}, {NOTE_F4, 1, 120},
+    {NOTE_F4, 1, 120}, {NOTE_E4, 1, 60},  {NOTE_E4, 1, 60},  {NOTE_E4, 1, 60},
+    {NOTE_G4, 1, 180}, {NOTE_G4, 1, 180}, {NOTE_F4, 1, 120}, {NOTE_D4, 1, 30}, {NOTE_C4, 2, 0},
+    {NOTE_REST, 4, 0},
+};
+#define XMAS_MELODY_LENGTH (sizeof(xmas_melody) / sizeof(xmas_melody[0]))
 
 // Control modes
 enum ControlMode {
     MODE_HUE = 0,
-    MODE_SATURATION,
     MODE_BRIGHTNESS,
     MODE_COUNT,
     MODE_EFFECT,
+    MODE_SPEED,
+    MODE_CONTROL,
     MODE_MAX
 };
 
 // Mode names (Japanese)
 const char* mode_names[] = {
     "色相",
-    "彩度",
     "明るさ",
     "LED数",
-    "エフェクト"
+    "エフェクト",
+    "スピード",
+    "コントロール"
 };
 
 ControlMode current_mode = MODE_HUE;
@@ -240,59 +297,65 @@ void update_leds() {
     }
 
     static uint32_t effect_counter = 0;
-    effect_counter++;
+    effect_counter += effect_speed;  // Speed controls how fast effects animate
+
+    // Stop buzzer if not on Xmas Song effect
+    static uint8_t last_effect = 255;
+    if (led_effect != 9 && last_effect == 9) {
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+        ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+    }
+    last_effect = led_effect;
 
     uint8_t r, g, b;
 
+    // Firefly state (persistent across calls)
+    static uint8_t firefly_brightness[LED_STRIP_MAX_LEDS] = {0};
+    static int8_t firefly_direction[LED_STRIP_MAX_LEDS] = {0};
+    static uint16_t firefly_hue[LED_STRIP_MAX_LEDS] = {0};  // For random firefly
+
     switch (led_effect) {
-        case 0: // Solid color
+        case 0: // Solid color - 単色
             hsv_to_rgb(led_hue, led_saturation, led_brightness, &r, &g, &b);
             for (int i = 0; i < LED_STRIP_MAX_LEDS; i++) {
                 if (i < led_count) {
-                    led_strip_set_pixel(led_strip, i, r, g, b);
-                } else {
-                    led_strip_set_pixel(led_strip, i, 0, 0, 0);
-                }
-            }
-            break;
-
-        case 1: // Rainbow
-            for (int i = 0; i < LED_STRIP_MAX_LEDS; i++) {
-                if (i < led_count) {
-                    uint16_t hue = (led_hue + (i * 360 / led_count) + effect_counter) % 360;
-                    hsv_to_rgb(hue, led_saturation, led_brightness, &r, &g, &b);
-                    led_strip_set_pixel(led_strip, i, r, g, b);
-                } else {
-                    led_strip_set_pixel(led_strip, i, 0, 0, 0);
-                }
-            }
-            break;
-
-        case 2: // Breathing
-            {
-                float breath = (sin(effect_counter * 0.05) + 1.0) / 2.0;
-                uint8_t bright = (uint8_t)(led_brightness * breath);
-                hsv_to_rgb(led_hue, led_saturation, bright, &r, &g, &b);
-                for (int i = 0; i < LED_STRIP_MAX_LEDS; i++) {
-                    if (i < led_count) {
-                        led_strip_set_pixel(led_strip, i, r, g, b);
-                    } else {
-                        led_strip_set_pixel(led_strip, i, 0, 0, 0);
-                    }
-                }
-            }
-            break;
-
-        case 3: // Chase
-            {
-                int chase_pos = (effect_counter / 3) % led_count;
-                hsv_to_rgb(led_hue, led_saturation, led_brightness, &r, &g, &b);
-                for (int i = 0; i < LED_STRIP_MAX_LEDS; i++) {
-                    if (i < led_count) {
-                        if (i == chase_pos) {
+                    if (control_active) {
+                        // Control mode: single LED at control_position
+                        if (i == control_position) {
                             led_strip_set_pixel(led_strip, i, r, g, b);
                         } else {
-                            led_strip_set_pixel(led_strip, i, r/10, g/10, b/10);
+                            led_strip_set_pixel(led_strip, i, r/15, g/15, b/15);
+                        }
+                    } else {
+                        led_strip_set_pixel(led_strip, i, r, g, b);
+                    }
+                } else {
+                    led_strip_set_pixel(led_strip, i, 0, 0, 0);
+                }
+            }
+            break;
+
+        case 1: // Chase - 追いかけっこ (multiple lights flowing)
+            {
+                hsv_to_rgb(led_hue, led_saturation, led_brightness, &r, &g, &b);
+                int num_chasers = 3;  // Number of chasing lights
+                int spacing = led_count / num_chasers;
+                int base_pos = control_active ? control_position : ((effect_counter / 2) % led_count);
+
+                for (int i = 0; i < LED_STRIP_MAX_LEDS; i++) {
+                    if (i < led_count) {
+                        bool is_chaser = false;
+                        for (int c = 0; c < num_chasers; c++) {
+                            int chaser_pos = (base_pos + c * spacing) % led_count;
+                            if (i == chaser_pos) {
+                                is_chaser = true;
+                                break;
+                            }
+                        }
+                        if (is_chaser) {
+                            led_strip_set_pixel(led_strip, i, r, g, b);
+                        } else {
+                            led_strip_set_pixel(led_strip, i, r/15, g/15, b/15);
                         }
                     } else {
                         led_strip_set_pixel(led_strip, i, 0, 0, 0);
@@ -301,17 +364,335 @@ void update_leds() {
             }
             break;
 
-        case 4: // Sparkle
-            hsv_to_rgb(led_hue, led_saturation, led_brightness, &r, &g, &b);
-            for (int i = 0; i < LED_STRIP_MAX_LEDS; i++) {
-                if (i < led_count) {
-                    if (esp_random() % 20 == 0) {
+        case 2: // Bounce - 往復 (light bounces back and forth)
+            {
+                hsv_to_rgb(led_hue, led_saturation, led_brightness, &r, &g, &b);
+                int bounce_pos;
+                if (control_active) {
+                    bounce_pos = control_position;
+                } else {
+                    int cycle = (led_count - 1) * 2;
+                    int pos_in_cycle = (effect_counter / 2) % cycle;
+                    bounce_pos = (pos_in_cycle < led_count) ? pos_in_cycle : (cycle - pos_in_cycle);
+                }
+
+                for (int i = 0; i < LED_STRIP_MAX_LEDS; i++) {
+                    if (i < led_count) {
+                        if (i == bounce_pos) {
+                            led_strip_set_pixel(led_strip, i, r, g, b);
+                        } else {
+                            led_strip_set_pixel(led_strip, i, r/15, g/15, b/15);
+                        }
+                    } else {
+                        led_strip_set_pixel(led_strip, i, 0, 0, 0);
+                    }
+                }
+            }
+            break;
+
+        case 3: // Comet - コメット (bright head with fading tail)
+            {
+                hsv_to_rgb(led_hue, led_saturation, led_brightness, &r, &g, &b);
+                int comet_head = control_active ? control_position : ((effect_counter / 2) % led_count);
+                int tail_length = 5;
+
+                for (int i = 0; i < LED_STRIP_MAX_LEDS; i++) {
+                    if (i < led_count) {
+                        int distance = (comet_head - i + led_count) % led_count;
+                        if (distance == 0) {
+                            // Head - full brightness
+                            led_strip_set_pixel(led_strip, i, r, g, b);
+                        } else if (distance <= tail_length) {
+                            // Tail - fading
+                            float fade = 1.0f - (float)distance / (tail_length + 1);
+                            led_strip_set_pixel(led_strip, i, (uint8_t)(r * fade), (uint8_t)(g * fade), (uint8_t)(b * fade));
+                        } else {
+                            led_strip_set_pixel(led_strip, i, 0, 0, 0);
+                        }
+                    } else {
+                        led_strip_set_pixel(led_strip, i, 0, 0, 0);
+                    }
+                }
+            }
+            break;
+
+        case 4: // Rainbow Flow - レインボー流れ
+            {
+                int offset = control_active ? (control_position * 360 / led_count) : (effect_counter * 2);
+                for (int i = 0; i < LED_STRIP_MAX_LEDS; i++) {
+                    if (i < led_count) {
+                        uint16_t hue = (i * 360 / led_count + offset) % 360;
+                        hsv_to_rgb(hue, led_saturation, led_brightness, &r, &g, &b);
                         led_strip_set_pixel(led_strip, i, r, g, b);
                     } else {
-                        led_strip_set_pixel(led_strip, i, r/8, g/8, b/8);
+                        led_strip_set_pixel(led_strip, i, 0, 0, 0);
+                    }
+                }
+            }
+            break;
+
+        case 5: // Random Blink - ランダム点滅
+            {
+                // Higher speed = more frequent blinks
+                int blink_threshold = 20 - effect_speed;  // Speed 1=19, Speed 9=11
+                for (int i = 0; i < LED_STRIP_MAX_LEDS; i++) {
+                    if (i < led_count) {
+                        if ((int)(esp_random() % blink_threshold) == 0) {
+                            // Random color and position
+                            uint16_t rand_hue = esp_random() % 360;
+                            hsv_to_rgb(rand_hue, led_saturation, led_brightness, &r, &g, &b);
+                            led_strip_set_pixel(led_strip, i, r, g, b);
+                        } else {
+                            led_strip_set_pixel(led_strip, i, 0, 0, 0);
+                        }
+                    } else {
+                        led_strip_set_pixel(led_strip, i, 0, 0, 0);
+                    }
+                }
+            }
+            break;
+
+        case 6: // Firefly - 蛍 (random positions slowly fade in/out)
+            {
+                hsv_to_rgb(led_hue, led_saturation, led_brightness, &r, &g, &b);
+
+                // Higher speed = faster fade and more frequent starts
+                int fade_step = effect_speed;  // Speed 1=1, Speed 9=9
+                int start_threshold = 110 - effect_speed * 10;  // Speed 1=100, Speed 9=20
+
+                for (int i = 0; i < led_count; i++) {
+                    // Random chance to start glowing
+                    if (firefly_brightness[i] == 0 && firefly_direction[i] == 0) {
+                        if ((int)(esp_random() % start_threshold) == 0) {
+                            firefly_direction[i] = 1;  // Start fading in
+                        }
+                    }
+
+                    // Update brightness
+                    if (firefly_direction[i] == 1) {
+                        firefly_brightness[i] = (uint8_t)MIN(250, firefly_brightness[i] + fade_step);
+                        if (firefly_brightness[i] >= 250) {
+                            firefly_direction[i] = -1;  // Start fading out
+                        }
+                    } else if (firefly_direction[i] == -1) {
+                        if (firefly_brightness[i] > fade_step) {
+                            firefly_brightness[i] -= fade_step;
+                        } else {
+                            firefly_brightness[i] = 0;
+                            firefly_direction[i] = 0;  // Done
+                        }
+                    }
+
+                    float scale = firefly_brightness[i] / 255.0f;
+                    led_strip_set_pixel(led_strip, i, (uint8_t)(r * scale), (uint8_t)(g * scale), (uint8_t)(b * scale));
+                }
+
+                // Clear unused LEDs
+                for (int i = led_count; i < LED_STRIP_MAX_LEDS; i++) {
+                    led_strip_set_pixel(led_strip, i, 0, 0, 0);
+                }
+            }
+            break;
+
+        case 7: // Random Firefly - ランダム蛍 (fireflies with random colors)
+            {
+                // Higher speed = faster fade and more frequent starts
+                int fade_step = effect_speed;
+                int start_threshold = 110 - effect_speed * 10;
+
+                for (int i = 0; i < led_count; i++) {
+                    // Random chance to start glowing with random color
+                    if (firefly_brightness[i] == 0 && firefly_direction[i] == 0) {
+                        if ((int)(esp_random() % start_threshold) == 0) {
+                            firefly_direction[i] = 1;
+                            firefly_hue[i] = esp_random() % 360;  // Random color
+                        }
+                    }
+
+                    // Update brightness
+                    if (firefly_direction[i] == 1) {
+                        firefly_brightness[i] = (uint8_t)MIN(250, firefly_brightness[i] + fade_step);
+                        if (firefly_brightness[i] >= 250) {
+                            firefly_direction[i] = -1;
+                        }
+                    } else if (firefly_direction[i] == -1) {
+                        if (firefly_brightness[i] > fade_step) {
+                            firefly_brightness[i] -= fade_step;
+                        } else {
+                            firefly_brightness[i] = 0;
+                            firefly_direction[i] = 0;
+                        }
+                    }
+
+                    // Use individual random hue for each firefly
+                    float scale = firefly_brightness[i] / 255.0f;
+                    uint8_t bright = (uint8_t)(led_brightness * scale);
+                    hsv_to_rgb(firefly_hue[i], led_saturation, bright, &r, &g, &b);
+                    led_strip_set_pixel(led_strip, i, r, g, b);
+                }
+
+                // Clear unused LEDs
+                for (int i = led_count; i < LED_STRIP_MAX_LEDS; i++) {
+                    led_strip_set_pixel(led_strip, i, 0, 0, 0);
+                }
+            }
+            break;
+
+        case 8: // Heartbeat - 心拍
+            {
+                // Heartbeat pattern: quick double pulse, then pause
+                int cycle = 100;
+                int pos = effect_counter % cycle;
+                float brightness_scale;
+
+                if (pos < 10) {
+                    // First beat up
+                    brightness_scale = pos / 10.0f;
+                } else if (pos < 20) {
+                    // First beat down
+                    brightness_scale = 1.0f - (pos - 10) / 10.0f;
+                } else if (pos < 30) {
+                    // Second beat up
+                    brightness_scale = (pos - 20) / 10.0f;
+                } else if (pos < 40) {
+                    // Second beat down
+                    brightness_scale = 1.0f - (pos - 30) / 10.0f;
+                } else {
+                    // Pause
+                    brightness_scale = 0.0f;
+                }
+
+                uint8_t bright = (uint8_t)(led_brightness * brightness_scale);
+                hsv_to_rgb(led_hue, led_saturation, bright, &r, &g, &b);
+
+                for (int i = 0; i < LED_STRIP_MAX_LEDS; i++) {
+                    if (i < led_count) {
+                        led_strip_set_pixel(led_strip, i, r, g, b);
+                    } else {
+                        led_strip_set_pixel(led_strip, i, 0, 0, 0);
+                    }
+                }
+            }
+            break;
+
+        case 9: // Xmas Song - クリスマスソング
+            {
+                // State for melody playback
+                static int melody_index = 0;
+                static int note_timer = 0;
+                static int note_duration_ticks = 0;
+                static int current_led_pos = 0;
+                static int16_t led_hues[LED_STRIP_MAX_LEDS];  // -1 = off, 0-359 = hue
+                static bool xmas_initialized = false;
+                static int last_control_pos = -1;
+
+                // Initialize LED hues array
+                if (!xmas_initialized) {
+                    for (int i = 0; i < LED_STRIP_MAX_LEDS; i++) {
+                        led_hues[i] = -1;  // All off
+                    }
+                    xmas_initialized = true;
+                    melody_index = 0;
+                    current_led_pos = 0;
+                    note_timer = 0;
+                    note_duration_ticks = 0;
+                }
+
+                // Tempo control: higher speed = faster tempo
+                int base_duration = 15 - effect_speed;  // Speed 1=14, Speed 9=6 ticks per unit
+
+                // Function to play a note and light LED
+                auto play_note = [&](int note_idx, int led_pos) {
+                    const MelodyNote* note = &xmas_melody[note_idx];
+
+                    // Store color in LED array (keep previous colors)
+                    if (note->freq > 0) {
+                        led_hues[led_pos] = note->hue;
+                    }
+
+                    // Play the note on buzzer
+                    if (note->freq > 0) {
+                        ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, note->freq);
+                        ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 256);
+                        ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+                    } else {
+                        ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+                        ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+                    }
+                };
+
+                if (control_active) {
+                    // Control mode: user manually advances through melody
+                    if (control_position != last_control_pos) {
+                        // User moved the dial - play next note
+                        int diff = control_position - last_control_pos;
+                        if (diff > led_count / 2) diff -= led_count;
+                        if (diff < -led_count / 2) diff += led_count;
+
+                        if (diff > 0) {
+                            // Forward - play notes
+                            for (int j = 0; j < diff; j++) {
+                                melody_index = (melody_index + 1) % XMAS_MELODY_LENGTH;
+                                current_led_pos = (current_led_pos + 1) % led_count;
+                                play_note(melody_index, current_led_pos);
+                            }
+                            note_timer = 0;  // Reset timer for staccato
+                        } else if (diff < 0) {
+                            // Backward - clear LEDs
+                            for (int j = 0; j < -diff; j++) {
+                                led_hues[current_led_pos] = -1;
+                                current_led_pos = (current_led_pos - 1 + led_count) % led_count;
+                                melody_index = (melody_index - 1 + XMAS_MELODY_LENGTH) % XMAS_MELODY_LENGTH;
+                            }
+                            ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+                            ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+                        }
+                        last_control_pos = control_position;
+                    }
+                    // Staccato - turn off buzzer after short time
+                    note_timer++;
+                    if (note_timer > 8) {
+                        ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+                        ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
                     }
                 } else {
-                    led_strip_set_pixel(led_strip, i, 0, 0, 0);
+                    // Auto mode: play melody automatically
+                    last_control_pos = control_position;  // Sync for when entering control mode
+
+                    // Check if we need to play next note
+                    if (note_timer >= note_duration_ticks) {
+                        melody_index = (melody_index + 1) % XMAS_MELODY_LENGTH;
+                        current_led_pos = (current_led_pos + 1) % led_count;
+
+                        // Reset when we've gone through all LEDs
+                        if (current_led_pos == 0) {
+                            for (int i = 0; i < LED_STRIP_MAX_LEDS; i++) {
+                                led_hues[i] = -1;
+                            }
+                        }
+
+                        play_note(melody_index, current_led_pos);
+                        note_duration_ticks = xmas_melody[melody_index].duration * base_duration;
+                        note_timer = 0;
+                    }
+
+                    note_timer++;
+
+                    // Staccato effect
+                    if (note_timer >= note_duration_ticks - 2) {
+                        ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+                        ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+                    }
+                }
+
+                // Display all lit LEDs with their stored colors
+                for (int i = 0; i < LED_STRIP_MAX_LEDS; i++) {
+                    if (i < led_count && led_hues[i] >= 0) {
+                        hsv_to_rgb(led_hues[i], led_saturation, led_brightness, &r, &g, &b);
+                        led_strip_set_pixel(led_strip, i, r, g, b);
+                    } else {
+                        led_strip_set_pixel(led_strip, i, 0, 0, 0);
+                    }
                 }
             }
             break;
@@ -432,6 +813,7 @@ void draw_circle_dot(float angle_deg, int radius, bool is_large, bool is_filled)
     if (is_filled) {
         canvas.fillCircle(x, y, dot_r, UI_WHITE);
     } else {
+        canvas.fillCircle(x, y, dot_r, UI_BLACK);
         canvas.drawCircle(x, y, dot_r, UI_WHITE);
     }
 }
@@ -440,8 +822,8 @@ void draw_circle_dot(float angle_deg, int radius, bool is_large, bool is_filled)
 void draw_menu_select() {
     canvas.fillScreen(UI_BLACK);
 
-    // Draw circle outline
-    canvas.drawCircle(CIRCLE_CENTER_X, CIRCLE_CENTER_Y, CIRCLE_RADIUS, UI_WHITE);
+    // Draw circle outline (thick, clean line)
+    canvas.fillArc(CIRCLE_CENTER_X, CIRCLE_CENTER_Y, CIRCLE_RADIUS - 1, CIRCLE_RADIUS + 1, 0, 360, UI_WHITE);
 
     // Draw menu dots (5 items evenly spaced)
     for (int i = 0; i < MODE_MAX; i++) {
@@ -455,11 +837,6 @@ void draw_menu_select() {
     canvas.setFont(&fonts::lgfxJapanGothicP_28);
     canvas.setTextColor(UI_WHITE);
     canvas.drawString(mode_names[current_mode], CIRCLE_CENTER_X, CIRCLE_CENTER_Y);
-
-    // Bottom: "変更"
-    canvas.setFont(&fonts::lgfxJapanGothicP_16);
-    canvas.setTextColor(UI_GRAY);
-    canvas.drawString("変更", CIRCLE_CENTER_X, 200);
 }
 
 // Arc parameters for Layer 2
@@ -467,30 +844,197 @@ void draw_menu_select() {
 #define ARC_END_ANGLE    45    // Right end (100%)
 #define ARC_SPAN         270   // Total arc span (going over the top)
 
+// Color wheel parameters
+#define COLOR_WHEEL_SEGMENTS  12
+#define COLOR_WHEEL_INNER_R   70
+#define COLOR_WHEEL_OUTER_R   120
+
+// Color names for hue ranges
+const char* get_color_name(uint16_t hue) {
+    if (hue < 15 || hue >= 345) return "RED";
+    if (hue < 45) return "ORANGE";
+    if (hue < 75) return "YELLOW";
+    if (hue < 105) return "LIME";
+    if (hue < 135) return "GREEN";
+    if (hue < 165) return "SPRING";
+    if (hue < 195) return "CYAN";
+    if (hue < 225) return "SKY";
+    if (hue < 255) return "BLUE";
+    if (hue < 285) return "PURPLE";
+    if (hue < 315) return "MAGENTA";
+    return "ROSE";
+}
+
+// Draw color wheel for hue selection
+void draw_hue_wheel() {
+    canvas.fillScreen(UI_BLACK);
+
+    // Find selected segment index
+    int selected_segment = (led_hue * COLOR_WHEEL_SEGMENTS / 360) % COLOR_WHEEL_SEGMENTS;
+
+    // Gap between segments (in degrees)
+    const float gap_angle = 6.0f;
+    const float segment_angle = 360.0f / COLOR_WHEEL_SEGMENTS;
+
+    // Draw color wheel segments with gaps
+    for (int i = 0; i < COLOR_WHEEL_SEGMENTS; i++) {
+        int hue = (i * 360) / COLOR_WHEEL_SEGMENTS;
+        float base_angle = (float)i * segment_angle - 90;  // -90 to start from top
+
+        // Shrink segment to create gap (add gap/2 to start, subtract gap/2 from end)
+        float start_angle = base_angle + gap_angle / 2.0f;
+        float end_angle = base_angle + segment_angle - gap_angle / 2.0f;
+
+        // Convert HSV to RGB for this segment
+        uint8_t r, g, b;
+        hsv_to_rgb(hue, 255, 255, &r, &g, &b);
+        uint16_t color = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+
+        // Draw filled arc segment
+        canvas.fillArc(CIRCLE_CENTER_X, CIRCLE_CENTER_Y,
+                       COLOR_WHEEL_INNER_R, COLOR_WHEEL_OUTER_R,
+                       start_angle, end_angle, color);
+
+        // Draw white border for selected segment
+        if (i == selected_segment) {
+            // Draw thick white arc borders (inner and outer)
+            for (int t = -1; t <= 1; t++) {
+                canvas.drawArc(CIRCLE_CENTER_X, CIRCLE_CENTER_Y,
+                               COLOR_WHEEL_INNER_R + t, COLOR_WHEEL_INNER_R + t + 1,
+                               start_angle, end_angle, UI_WHITE);
+                canvas.drawArc(CIRCLE_CENTER_X, CIRCLE_CENTER_Y,
+                               COLOR_WHEEL_OUTER_R + t - 1, COLOR_WHEEL_OUTER_R + t,
+                               start_angle, end_angle, UI_WHITE);
+            }
+            // Draw side lines (thick)
+            float rad1 = start_angle * 3.14159f / 180.0f;
+            float rad2 = end_angle * 3.14159f / 180.0f;
+            for (int t = -1; t <= 1; t++) {
+                float perp1 = rad1 + 3.14159f / 2.0f;
+                float perp2 = rad2 + 3.14159f / 2.0f;
+                int ox1 = (int)(cos(perp1) * t);
+                int oy1 = (int)(sin(perp1) * t);
+                int ox2 = (int)(cos(perp2) * t);
+                int oy2 = (int)(sin(perp2) * t);
+                canvas.drawLine(
+                    CIRCLE_CENTER_X + (int)(cos(rad1) * COLOR_WHEEL_INNER_R) + ox1,
+                    CIRCLE_CENTER_Y + (int)(sin(rad1) * COLOR_WHEEL_INNER_R) + oy1,
+                    CIRCLE_CENTER_X + (int)(cos(rad1) * COLOR_WHEEL_OUTER_R) + ox1,
+                    CIRCLE_CENTER_Y + (int)(sin(rad1) * COLOR_WHEEL_OUTER_R) + oy1, UI_WHITE);
+                canvas.drawLine(
+                    CIRCLE_CENTER_X + (int)(cos(rad2) * COLOR_WHEEL_INNER_R) + ox2,
+                    CIRCLE_CENTER_Y + (int)(sin(rad2) * COLOR_WHEEL_INNER_R) + oy2,
+                    CIRCLE_CENTER_X + (int)(cos(rad2) * COLOR_WHEEL_OUTER_R) + ox2,
+                    CIRCLE_CENTER_Y + (int)(sin(rad2) * COLOR_WHEEL_OUTER_R) + oy2, UI_WHITE);
+            }
+        }
+    }
+
+    // Draw center circle with selected segment's color (same as wheel)
+    int display_hue = (selected_segment * 360) / COLOR_WHEEL_SEGMENTS;
+    uint8_t r, g, b;
+    hsv_to_rgb(display_hue, 255, 255, &r, &g, &b);
+    uint16_t center_color = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+
+    int center_radius = COLOR_WHEEL_INNER_R - 15;
+    canvas.fillCircle(CIRCLE_CENTER_X, CIRCLE_CENTER_Y, center_radius, center_color);
+
+    // Draw color name in center (black text for visibility on bright colors)
+    canvas.setTextDatum(MC_DATUM);
+    canvas.setFont(&fonts::Font4);
+    canvas.setTextColor(UI_BLACK);
+    canvas.drawString(get_color_name(display_hue), CIRCLE_CENTER_X, CIRCLE_CENTER_Y);
+}
+
+// Draw effect selection (same style as Layer 1)
+void draw_effect_select() {
+    canvas.fillScreen(UI_BLACK);
+
+    // Draw circle outline (thick, clean line)
+    canvas.fillArc(CIRCLE_CENTER_X, CIRCLE_CENTER_Y, CIRCLE_RADIUS - 1, CIRCLE_RADIUS + 1, 0, 360, UI_WHITE);
+
+    // Draw effect dots (NUM_EFFECTS items evenly spaced)
+    for (int i = 0; i < NUM_EFFECTS; i++) {
+        float angle = (360.0f / NUM_EFFECTS) * i;
+        float angle_rad = (angle - 90) * 3.14159f / 180.0f;
+        int x = CIRCLE_CENTER_X + (int)(cos(angle_rad) * CIRCLE_RADIUS);
+        int y = CIRCLE_CENTER_Y + (int)(sin(angle_rad) * CIRCLE_RADIUS);
+        int dot_r = (i == led_effect) ? DOT_RADIUS_LARGE : DOT_RADIUS_SMALL;
+
+        if (i == led_effect) {
+            canvas.fillCircle(x, y, dot_r, UI_WHITE);
+        } else {
+            canvas.fillCircle(x, y, dot_r, UI_BLACK);
+            canvas.drawCircle(x, y, dot_r, UI_WHITE);
+        }
+    }
+
+    // Center: Effect name
+    canvas.setTextDatum(MC_DATUM);
+    canvas.setFont(&fonts::lgfxJapanGothicP_28);
+    canvas.setTextColor(UI_WHITE);
+    canvas.drawString(effect_names[led_effect], CIRCLE_CENTER_X, CIRCLE_CENTER_Y);
+}
+
+// Draw control mode UI
+void draw_control_mode() {
+    canvas.fillScreen(UI_BLACK);
+
+    // Draw full circle
+    canvas.fillArc(CIRCLE_CENTER_X, CIRCLE_CENTER_Y, CIRCLE_RADIUS - 1, CIRCLE_RADIUS + 1, 0, 360, UI_WHITE);
+
+    // Draw position indicator on circle
+    float angle_deg = (360.0f * control_position / led_count) - 90;  // -90 to start from top
+    float angle_rad = angle_deg * 3.14159f / 180.0f;
+    int dot_x = CIRCLE_CENTER_X + (int)(cos(angle_rad) * CIRCLE_RADIUS);
+    int dot_y = CIRCLE_CENTER_Y + (int)(sin(angle_rad) * CIRCLE_RADIUS);
+    canvas.fillCircle(dot_x, dot_y, DOT_RADIUS_LARGE, UI_WHITE);
+
+    // Center: Effect name and position
+    canvas.setTextDatum(MC_DATUM);
+    canvas.setFont(&fonts::lgfxJapanGothicP_20);
+    canvas.setTextColor(UI_WHITE);
+    canvas.drawString(effect_names[led_effect], CIRCLE_CENTER_X, CIRCLE_CENTER_Y - 20);
+
+    char pos_str[16];
+    snprintf(pos_str, sizeof(pos_str), "%d / %d", control_position + 1, led_count);
+    canvas.setFont(&fonts::lgfxJapanGothicP_28);
+    canvas.drawString(pos_str, CIRCLE_CENTER_X, CIRCLE_CENTER_Y + 20);
+}
+
 // Draw Layer 2: Value Adjustment
 void draw_value_adjust() {
+    // Special UI for hue selection
+    if (current_mode == MODE_HUE) {
+        draw_hue_wheel();
+        return;
+    }
+
+    // Special UI for effect selection (same as Layer 1 style)
+    if (current_mode == MODE_EFFECT) {
+        draw_effect_select();
+        return;
+    }
+
+    // Special UI for control mode
+    if (current_mode == MODE_CONTROL) {
+        draw_control_mode();
+        return;
+    }
+
     canvas.fillScreen(UI_BLACK);
 
     // Draw arc (open at bottom): from 135° to 45° going through top
-    // LovyanGFX drawArc: x, y, r1, r2, angle1, angle2
     canvas.drawArc(CIRCLE_CENTER_X, CIRCLE_CENTER_Y, CIRCLE_RADIUS - 1, CIRCLE_RADIUS + 1,
-                   ARC_START_ANGLE, 360, UI_WHITE);  // 135° to 360°
+                   ARC_START_ANGLE, 360, UI_WHITE);
     canvas.drawArc(CIRCLE_CENTER_X, CIRCLE_CENTER_Y, CIRCLE_RADIUS - 1, CIRCLE_RADIUS + 1,
-                   0, ARC_END_ANGLE, UI_WHITE);       // 0° to 45°
+                   0, ARC_END_ANGLE, UI_WHITE);
 
     // Calculate current value as percentage (0.0 - 1.0)
     float value_pct = 0.0f;
     char value_str[32];
 
     switch (current_mode) {
-        case MODE_HUE:
-            value_pct = led_hue / 360.0f;
-            snprintf(value_str, sizeof(value_str), "%d°", led_hue);
-            break;
-        case MODE_SATURATION:
-            value_pct = led_saturation / 255.0f;
-            snprintf(value_str, sizeof(value_str), "%d%%", led_saturation * 100 / 255);
-            break;
         case MODE_BRIGHTNESS:
             value_pct = led_brightness / 255.0f;
             snprintf(value_str, sizeof(value_str), "%d%%", led_brightness * 100 / 255);
@@ -499,17 +1043,16 @@ void draw_value_adjust() {
             value_pct = (led_count - 1) / (float)(LED_STRIP_MAX_LEDS - 1);
             snprintf(value_str, sizeof(value_str), "%d", led_count);
             break;
-        case MODE_EFFECT:
-            value_pct = led_effect / (float)(NUM_EFFECTS - 1);
-            snprintf(value_str, sizeof(value_str), "%s", effect_names[led_effect]);
+        case MODE_SPEED:
+            value_pct = (effect_speed - 1) / 8.0f;  // 1-9 mapped to 0-1
+            snprintf(value_str, sizeof(value_str), "%d", effect_speed);
             break;
         default:
             value_str[0] = '\0';
     }
 
     // Draw position dot on arc
-    // Map value_pct (0-1) to angle: 0% = 135°, 100% = 45° (going through 270°/top)
-    float angle_deg = ARC_START_ANGLE + value_pct * ARC_SPAN;  // 135 + pct * 270
+    float angle_deg = ARC_START_ANGLE + value_pct * ARC_SPAN;
     if (angle_deg >= 360) angle_deg -= 360;
 
     float angle_rad = angle_deg * 3.14159f / 180.0f;
@@ -525,11 +1068,6 @@ void draw_value_adjust() {
 
     canvas.setFont(&fonts::lgfxJapanGothicP_28);
     canvas.drawString(value_str, CIRCLE_CENTER_X, CIRCLE_CENTER_Y + 20);
-
-    // Bottom: "決定"
-    canvas.setFont(&fonts::lgfxJapanGothicP_16);
-    canvas.setTextColor(UI_GRAY);
-    canvas.drawString("決定", CIRCLE_CENTER_X, 200);
 }
 
 void update_display() {
@@ -764,10 +1302,14 @@ extern "C" void app_main(void) {
             if (in_adjustment_mode) {
                 // Layer 2 -> Layer 1: Confirm and go back
                 in_adjustment_mode = false;
+                control_active = false;
                 buzzer_beep(1000, 30);
             } else {
                 // Layer 1 -> Layer 2: Enter adjustment mode
                 in_adjustment_mode = true;
+                if (current_mode == MODE_CONTROL) {
+                    control_active = true;
+                }
                 buzzer_beep(1500, 30);
             }
         }
@@ -782,19 +1324,25 @@ extern "C" void app_main(void) {
                 // Layer 2: Adjust value
                 switch (current_mode) {
                     case MODE_HUE:
-                        led_hue = (led_hue + diff * 10 + 360) % 360;
-                        break;
-                    case MODE_SATURATION:
-                        led_saturation = (uint8_t)MAX(0, MIN(255, led_saturation + diff * 8));
+                        // 12 segments = 30 degrees per step (360/12)
+                        led_hue = (led_hue + diff * 30 + 360) % 360;
                         break;
                     case MODE_BRIGHTNESS:
-                        led_brightness = (uint8_t)MAX(0, MIN(255, led_brightness + diff * 8));
+                        // 20% steps (255 / 5 = 51)
+                        led_brightness = (uint8_t)MAX(0, MIN(255, led_brightness + diff * 51));
                         break;
                     case MODE_COUNT:
                         led_count = (uint8_t)MAX(1, MIN(LED_STRIP_MAX_LEDS, led_count + diff));
                         break;
                     case MODE_EFFECT:
                         led_effect = (led_effect + diff + NUM_EFFECTS) % NUM_EFFECTS;
+                        break;
+                    case MODE_SPEED:
+                        effect_speed = (uint8_t)MAX(1, MIN(9, effect_speed + diff));
+                        break;
+                    case MODE_CONTROL:
+                        // Wrap around based on led_count
+                        control_position = (control_position + diff + led_count) % led_count;
                         break;
                     default:
                         break;
