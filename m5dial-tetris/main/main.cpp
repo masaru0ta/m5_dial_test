@@ -1,10 +1,10 @@
 /**
- * M5Dial Tetris Game
+ * M5Dial テトリスゲーム
  *
- * Controls:
- * - Rotate encoder: Move piece left/right
- * - Press encoder: Rotate piece
- * - Hold encoder: Drop piece faster
+ * 操作:
+ * - エンコーダー回転: ピースを左右に移動
+ * - エンコーダー押下: ピースを回転
+ * - エンコーダー長押し: 高速落下
  */
 
 #include <stdio.h>
@@ -36,7 +36,7 @@
 
 static const char *TAG = "M5Dial-Tetris";
 
-// Pin Definitions
+// ピン定義
 #define LCD_MOSI_PIN 5
 #define LCD_SCLK_PIN 6
 #define LCD_DC_PIN   4
@@ -50,14 +50,14 @@ static const char *TAG = "M5Dial-Tetris";
 
 #define BUZZER_PIN 3
 
-// Tetris Constants
+// テトリス定数
 #define BOARD_WIDTH 10
 #define BOARD_HEIGHT 20
 #define BLOCK_SIZE 10
 #define BOARD_X ((240 - BOARD_WIDTH * BLOCK_SIZE) / 2)
 #define BOARD_Y 15
 
-// Tetromino shapes (4 rotations each)
+// テトロミノの形状 (各4回転)
 static const uint16_t TETROMINOES[7][4] = {
     // I
     {0x0F00, 0x2222, 0x00F0, 0x4444},
@@ -75,18 +75,18 @@ static const uint16_t TETROMINOES[7][4] = {
     {0x0E20, 0x44C0, 0x8E00, 0xC440},
 };
 
-// Colors for each tetromino
+// 各テトロミノの色
 static const uint16_t TETRO_COLORS[7] = {
-    0x07FF,  // I - Cyan
-    0xFFE0,  // O - Yellow
-    0xF81F,  // T - Purple
-    0x07E0,  // S - Green
-    0xF800,  // Z - Red
-    0x001F,  // J - Blue
-    0xFD20,  // L - Orange
+    0x07FF,  // I - シアン
+    0xFFE0,  // O - 黄色
+    0xF81F,  // T - 紫
+    0x07E0,  // S - 緑
+    0xF800,  // Z - 赤
+    0x001F,  // J - 青
+    0xFD20,  // L - オレンジ
 };
 
-// M5Dial Display Class
+// M5Dialディスプレイクラス
 class LGFX_M5Dial : public lgfx::LGFX_Device {
     lgfx::Panel_GC9A01 _panel_instance;
     lgfx::Bus_SPI _bus_instance;
@@ -137,11 +137,11 @@ public:
     }
 };
 
-// Global instances
+// グローバルインスタンス
 LGFX_M5Dial display;
 LGFX_Sprite canvas(&display);
 
-// Game state
+// ゲーム状態
 uint8_t board[BOARD_HEIGHT][BOARD_WIDTH] = {0};
 int current_piece = 0;
 int current_rotation = 0;
@@ -154,10 +154,10 @@ uint32_t level = 1;
 bool game_over = false;
 bool game_paused = false;
 
-// Encoder state
+// エンコーダー状態
 volatile int32_t encoder_count = 0;
 volatile int32_t encoder_raw = 0;
-// Button state now polled in main loop
+// ボタン状態はメインループでポーリング
 static bool last_button_state = false;
 static uint32_t button_press_time = 0;
 static bool button_was_long_press = false;
@@ -165,14 +165,14 @@ static bool button_just_released_short = false;
 static const uint32_t LONG_PRESS_MS = 150;
 static int8_t last_state = 0;
 
-// WiFi state
+// WiFi状態
 static EventGroupHandle_t wifi_event_group;
 static const int WIFI_CONNECTED_BIT = BIT0;
 static char ip_address[16] = "";
 static bool ota_in_progress = false;
 static int ota_progress = 0;
 
-// State table for quadrature decoding
+// 直交デコード用状態テーブル
 static const int8_t quad_table[4][4] = {
     {  0, +1,  0, -1 },
     { -1,  0, +1,  0 },
@@ -180,7 +180,7 @@ static const int8_t quad_table[4][4] = {
     { +1,  0, -1,  0 },
 };
 
-// Encoder ISR
+// エンコーダーISR
 static void IRAM_ATTR encoder_isr(void* arg) {
     int a = gpio_get_level((gpio_num_t)ENCODER_A_PIN);
     int b = gpio_get_level((gpio_num_t)ENCODER_B_PIN);
@@ -192,7 +192,7 @@ static void IRAM_ATTR encoder_isr(void* arg) {
 }
 
 
-// Buzzer functions
+// ブザー関数
 void buzzer_init() {
     ledc_timer_config_t timer_conf = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
@@ -252,7 +252,7 @@ void play_game_over_sound() {
     }
 }
 
-// Encoder init
+// エンコーダー初期化
 void encoder_init() {
     gpio_config_t io_conf = {};
     io_conf.intr_type = GPIO_INTR_ANYEDGE;
@@ -272,10 +272,10 @@ void encoder_init() {
     gpio_install_isr_service(0);
     gpio_isr_handler_add((gpio_num_t)ENCODER_A_PIN, encoder_isr, NULL);
     gpio_isr_handler_add((gpio_num_t)ENCODER_B_PIN, encoder_isr, NULL);
-    // Button is polled, not using ISR
+    // ボタンはISRではなくポーリング
 }
 
-// ===== Tetris Game Logic =====
+// ===== テトリスゲームロジック =====
 
 bool get_tetromino_cell(int piece, int rotation, int x, int y) {
     uint16_t shape = TETROMINOES[piece][rotation];
@@ -335,7 +335,7 @@ int clear_lines() {
             for (int x = 0; x < BOARD_WIDTH; x++) {
                 board[0][x] = 0;
             }
-            y++;  // Check same row again
+            y++;  // 同じ行を再チェック
         }
     }
     return cleared;
@@ -365,7 +365,7 @@ void new_game() {
     encoder_raw = 0;
 }
 
-// ===== Drawing Functions =====
+// ===== 描画関数 =====
 
 void draw_block(int x, int y, uint16_t color) {
     int px = BOARD_X + x * BLOCK_SIZE;
@@ -375,12 +375,12 @@ void draw_block(int x, int y, uint16_t color) {
 }
 
 void draw_board() {
-    // Draw border
+    // 枠線を描画
     canvas.drawRect(BOARD_X - 1, BOARD_Y - 1,
                     BOARD_WIDTH * BLOCK_SIZE + 2,
                     BOARD_HEIGHT * BLOCK_SIZE + 2, TFT_WHITE);
 
-    // Draw placed blocks
+    // 配置済みブロックを描画
     for (int y = 0; y < BOARD_HEIGHT; y++) {
         for (int x = 0; x < BOARD_WIDTH; x++) {
             if (board[y][x] != 0) {
@@ -389,7 +389,7 @@ void draw_board() {
         }
     }
 
-    // Draw current piece
+    // 現在のピースを描画
     for (int y = 0; y < 4; y++) {
         for (int x = 0; x < 4; x++) {
             if (get_tetromino_cell(current_piece, current_rotation, x, y)) {
@@ -402,7 +402,7 @@ void draw_board() {
         }
     }
 
-    // Draw ghost piece
+    // ゴーストピースを描画
     int ghost_y = piece_y;
     while (!check_collision(current_piece, current_rotation, piece_x, ghost_y + 1)) {
         ghost_y++;
@@ -426,7 +426,7 @@ void draw_board() {
 }
 
 void draw_next_piece() {
-    // Position adjusted for circular display - move down from corner
+    // 円形ディスプレイ用に位置調整 - 角から下に移動
     int nx = BOARD_X + BOARD_WIDTH * BLOCK_SIZE + 10;
     int ny = BOARD_Y + 40;
 
@@ -451,7 +451,7 @@ void draw_score() {
     canvas.setFont(&fonts::Font0);
     canvas.setTextDatum(TL_DATUM);
 
-    // Position adjusted for circular display - move right and down
+    // 円形ディスプレイ用に位置調整 - 右下に移動
     int sx = 18;
     int sy = 55;
 
@@ -497,7 +497,7 @@ void update_display() {
     canvas.pushSprite(0, 0);
 }
 
-// ===== WiFi and OTA Functions =====
+// ===== WiFiとOTA関数 =====
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                int32_t event_id, void* event_data) {
@@ -616,7 +616,7 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// ===== Button Handling =====
+// ===== ボタン処理 =====
 
 void update_button_state() {
     uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
@@ -624,16 +624,16 @@ void update_button_state() {
     button_just_released_short = false;
 
     if (current_button && !last_button_state) {
-        // Button just pressed
+        // ボタンが押された瞬間
         button_press_time = now;
         button_was_long_press = false;
     } else if (current_button && last_button_state) {
-        // Button still held
+        // ボタンが押され続けている
         if (!button_was_long_press && (now - button_press_time) >= LONG_PRESS_MS) {
             button_was_long_press = true;
         }
     } else if (!current_button && last_button_state) {
-        // Button just released
+        // ボタンが離された瞬間
         if (!button_was_long_press) {
             button_just_released_short = true;
         }
@@ -661,12 +661,12 @@ void start_ota_server() {
     }
 }
 
-// ===== Main =====
+// ===== メイン =====
 
 extern "C" void app_main(void) {
-    ESP_LOGI(TAG, "M5Dial Tetris Starting...");
+    ESP_LOGI(TAG, "M5Dial テトリス開始...");
 
-    // Initialize NVS
+    // NVS初期化
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -674,23 +674,23 @@ extern "C" void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
-    // Initialize Display
+    // ディスプレイ初期化
     display.init();
     display.setBrightness(128);
     display.setRotation(0);
     canvas.createSprite(240, 240);
 
-    // Initialize peripherals
+    // 周辺機器初期化
     buzzer_init();
     encoder_init();
 
-    // Initialize WiFi and OTA
+    // WiFiとOTA初期化
     wifi_init();
     xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(5000));
     mdns_init_service();
     start_ota_server();
 
-    // Start game
+    // ゲーム開始
     new_game();
     buzzer_beep(1000, 100);
 
@@ -698,7 +698,7 @@ extern "C" void app_main(void) {
     uint32_t last_drop = 0;
     uint32_t drop_interval = 1000;
 
-    // Main loop
+    // メインループ
     while (1) {
         update_button_state();
         if (ota_in_progress) {
@@ -717,7 +717,7 @@ extern "C" void app_main(void) {
             continue;
         }
 
-        // Handle rotation (button press)
+        // 回転処理 (ボタン押下)
         if (was_short_press()) {
             int new_rotation = (current_rotation + 1) % 4;
             if (!check_collision(current_piece, new_rotation, piece_x, piece_y)) {
@@ -726,7 +726,7 @@ extern "C" void app_main(void) {
             }
         }
 
-        // Handle horizontal movement (encoder)
+        // 左右移動処理 (エンコーダー)
         int32_t current_encoder = encoder_count;
         if (current_encoder != last_encoder) {
             int diff = current_encoder - last_encoder;
@@ -738,10 +738,10 @@ extern "C" void app_main(void) {
             last_encoder = current_encoder;
         }
 
-        // Handle drop (button held)
-        // Button state updated at start of loop
+        // 高速落下処理 (ボタン長押し)
+        // ボタン状態はループ開始時に更新済み
 
-        // Auto drop
+        // 自動落下
         uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
         uint32_t interval = is_button_held() ? 50 : drop_interval;
 
